@@ -549,7 +549,7 @@ def set_autostart(on):
             f.write(text)
         return
     import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:  # la chiave puo' non esistere (profili nuovi)
         if on:
             winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, exe_command())
         else:
