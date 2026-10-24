@@ -91,6 +91,10 @@ Prova il protocollo (Decodium/WSJT-X, XML N1MM/QARTest, ADIF), la coda e i riten
 
 HH ascolta solo su `127.0.0.1` (non è raggiungibile dalla rete) e invia i QSO a `https://hamhub.cloud/log-api/adif` con la tua chiave di invio, che puoi revocare in ogni momento dalla pagina *Chiave*. [Informativa privacy](https://hamhub.cloud/privacy/).
 
+## Licenza
+
+[MIT](LICENSE): puoi usare, modificare e ridistribuire HH liberamente, mantenendo l'avviso di copyright.
+
 ## Autori
 
 Progetto: IU8LMC Martino Merola · 9H1SR Salvatore Raccampo · Contatti: iu8lmc@gmail.com
