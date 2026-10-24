@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+hh.icns
+# la chiave di invio non va mai nel repository
+HH.ini
+HH_queue.adi
+HH.log
+# eseguibili e installatori: si costruiscono (python build.py, Inno Setup) e si pubblicano su hamhub.cloud/downloads
+HH.exe
+installer-out/
+old-1.0/

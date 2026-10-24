@@ -1,0 +1,4 @@
+# Facoltativi: servono solo per l'icona nell'area di notifica su Linux e macOS (su Windows l'icona e' nativa).
+# Senza, HH funziona ugualmente in background con le notifiche del sistema.
+pystray>=0.19
+pillow>=10
