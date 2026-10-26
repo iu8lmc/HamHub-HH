@@ -4,17 +4,23 @@ Decodium (protocollo WSJT-X: "Logged ADIF" e "QSO Logged"), QARTest e gli altri 
 invia a hamhub.cloud con la chiave di invio dell'utente. Senza rete i QSO restano in coda (HH_queue.adi) e vengono
 rispediti. HH vive nell'area di notifica (vicino all'orologio): doppio clic per aprire il log, clic destro per il menu.
 
+DecoDXLog parla con HH anche in modo nativo, con il protocollo DecoPort: stessa password nei due programmi e i QSO arrivano
+firmati e confermati, senza indirizzi da scrivere.
+
 Funziona su Windows (icona nativa), Linux e macOS (icona con pystray + Pillow, se installati; altrimenti in background con notifiche del sistema).
 
 Uso:
   HH.exe              avvia HH nell'area di notifica (una sola istanza)   [Linux/macOS: python3 HH.py]
   HH.exe --setup      finestra di configurazione (chiave di invio, porta)
   HH.exe --configure CHIAVE [PORTA]   salva la configurazione senza finestre (server e terminali senza schermo)
+  HH.exe --decoport PASSWORD [PORTA]  salva la password DecoPort (e la porta) per ricevere i QSO da DecoDXLog
   HH.exe --console    solo ricevitore, in una finestra di testo (per le prove)
   HH.exe --version    stampa la versione
 """
 import ctypes
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -31,7 +37,7 @@ import webbrowser
 import xml.etree.ElementTree as ET
 from collections import deque
 
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 FROZEN = bool(getattr(sys, 'frozen', False))
 PROGRAM_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
 RES_DIR = getattr(sys, '_MEIPASS', PROGRAM_DIR)  # risorse (icona) dentro il pacchetto
@@ -59,6 +65,7 @@ LOG = os.path.join(HERE, 'HH.log')
 DEFAULT_URL = 'https://hamhub.cloud/log-api/adif'
 LOG_PAGE = 'https://hamhub.cloud/log/#qso'
 DEFAULT_PORT = 12060
+DEFAULT_DP_PORT = 5561
 MUTEX_NAME = 'HamHubHH_SingleInstance'
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_VALUE = 'HamHubHH'
@@ -86,13 +93,15 @@ def log(msg):
 
 
 def read_cfg():
-    cfg = {'token': '', 'port': str(DEFAULT_PORT), 'url': DEFAULT_URL, 'notify': '1'}
+    cfg = {'token': '', 'port': str(DEFAULT_PORT), 'url': DEFAULT_URL, 'notify': '1', 'decoport': '', 'decoport_port': str(DEFAULT_DP_PORT)}
     if os.path.exists(CFG):
         with open(CFG, encoding='utf-8') as f:
             for raw in f:
                 if '=' in raw and not raw.strip().startswith('#'):
                     k, v = raw.split('=', 1)
                     cfg[k.strip().lower()] = v.strip()
+    if not cfg['decoport_port'].strip():
+        cfg['decoport_port'] = str(DEFAULT_DP_PORT)
     return cfg
 
 
@@ -100,7 +109,7 @@ def write_cfg(cfg):
     tmp = CFG + '.new'
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write('# HH - configurazione\n')
-        for k in ('token', 'port', 'url', 'notify'):
+        for k in ('token', 'port', 'url', 'notify', 'decoport', 'decoport_port'):
             f.write(f'{k}={cfg.get(k, "")}\n')
     if not IS_WIN:
         try:
@@ -252,6 +261,93 @@ def parse_packet(data):
     return parse_message(data)[2]
 
 
+# ---------------------------------------------------------------- DecoPort: i QSO da DecoDXLog
+# DecoPort e' il protocollo di Decodium per la radio in rete: UDP, intestazione "DPRT" di 28 byte, ogni pacchetto firmato con
+# HMAC-SHA256 (16 byte in coda) con la chiave derivata da una password condivisa. DecoDXLog fa da "gateway" del log: HH si
+# registra con HELLO sulla sua porta (127.0.0.1:5561), riceve i QSO (tipo 17) e li conferma (tipo 18). Il formato e' in
+# DecoDXLog: docs/DECOPORT-LOG.md. Senza password HH non apre niente: DecoPort non ha una modalita' in chiaro.
+DP_MAGIC = 0x44505254
+DP_SALT = b'Decodium-DecoPort-v1'  # costante del formato DecoPort: con un altro sale la stessa password darebbe un'altra chiave
+DP_HELLO, DP_BYE, DP_KEEPALIVE, DP_LOG_ANNOUNCE, DP_LOG_QSO, DP_LOG_ACK = 2, 3, 4, 16, 17, 18
+DP_HEADER, DP_TAG, DP_WINDOW = 28, 16, 30
+
+
+def no_connreset(sock):
+    """Windows: un invio UDP a una porta chiusa fa fallire la lettura successiva (WSAECONNRESET); qui si spegne. Se non riesce, il ciclo lo ignora."""
+    if not IS_WIN:
+        return
+    try:
+        off, got = ctypes.c_ulong(0), ctypes.c_ulong(0)
+        ctypes.windll.ws2_32.WSAIoctl(ctypes.c_size_t(sock.fileno()), 0x9800000C, ctypes.byref(off), 4, None, 0, ctypes.byref(got), None, None)
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def dp_key(password):
+    password = (password or '').strip()
+    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), DP_SALT, 200000, 32) if password else b''
+
+
+def dp_build(ptype, stream_id, seq, payload, key, now=None):
+    """Un pacchetto DecoPort firmato (senza chiave: non firmato, solo per le prove)."""
+    ms = int((time.time() if now is None else now) * 1000)
+    pkt = struct.pack('>IBBHIIIIHH', DP_MAGIC, 1, ptype, 1 | (2 if key else 0), stream_id, seq, ms // 1000, (ms % 1000) * 1000000,
+                      len(payload), 0) + payload
+    if key:
+        pkt += hmac.new(key, pkt, hashlib.sha256).digest()[:DP_TAG]
+    return pkt
+
+
+def dp_parse(data, key, now=None):
+    """Datagramma -> (esito, (tipo, stream, sequenza, payload)). Esito: 'ok', 'malformed', 'unsigned', 'bad' (firma), 'stale' (ora)."""
+    if len(data) < DP_HEADER:
+        return 'malformed', None
+    magic, version, ptype, flags, stream_id, seq, sec, _ns, length, _res = struct.unpack('>IBBHIIIIHH', data[:DP_HEADER])
+    if magic != DP_MAGIC or version != 1 or DP_HEADER + length > len(data):
+        return 'malformed', None
+    if not (flags & 2) or not key:
+        return 'unsigned', None
+    end = DP_HEADER + length
+    if len(data) < end + DP_TAG:
+        return 'malformed', None
+    if not hmac.compare_digest(hmac.new(key, data[:end], hashlib.sha256).digest()[:DP_TAG], data[end:end + DP_TAG]):
+        return 'bad', None
+    t = time.time() if now is None else now
+    if not (flags & 1) or abs(t - sec) > DP_WINDOW:  # una firma sola non ferma un pacchetto registrato e rimandato
+        return 'stale', None
+    return 'ok', (ptype, stream_id, seq, data[DP_HEADER:end])
+
+
+def _dp_str(data, pos):
+    if pos >= len(data) or pos + 1 + data[pos] > len(data):
+        raise ValueError('stringa troncata')
+    n = data[pos]
+    return data[pos + 1:pos + 1 + n].decode('utf-8', 'replace'), pos + 1 + n
+
+
+def dp_announce(payload):
+    """L'annuncio del log: programma, versione, stazione, porta della sessione (o None se non si legge)."""
+    try:
+        mask = struct.unpack('>I', payload[:4])[0]
+        pos, out = 4, {'program': '', 'version': '', 'station': '', 'port': 0}
+        for bit, name in ((0, 'program'), (1, 'version'), (2, 'station')):
+            if mask & (1 << bit):
+                out[name], pos = _dp_str(payload, pos)
+        if mask & 8:
+            out['port'] = struct.unpack('>H', payload[pos:pos + 2])[0]
+        return out
+    except (struct.error, ValueError):
+        return None
+
+
+def dp_qso(payload):
+    """Un QSO del log: (id nel log, rimandato, testo ADIF) o None."""
+    if len(payload) < 9:
+        return None
+    qid, flags = struct.unpack('>qB', payload[:9])
+    return qid, bool(flags & 1), payload[9:].decode('utf-8', 'replace')
+
+
 def adif_key(text):
     """Chiave per riconoscere lo stesso QSO arrivato come "QSO Logged" e come "Logged ADIF": nominativo, data, ora (HHMM)."""
     def f(name):
@@ -336,6 +432,10 @@ class Core:
         self.sent_total = 0
         self.net = 'ok'                 # ok | offline | key_invalid | no_key
         self.pending5 = {}              # QSO arrivati come "QSO Logged": si attende l'eventuale "Logged ADIF"
+        self.dp_state = 'off'           # DecoPort: off (nessuna password) | searching | linked
+        self.dp_seen = 0.0              # ultimo pacchetto valido di DecoDXLog
+        self.dp_peer = ''               # "DecoDXLog 1.2.3 · IU8LMC"
+        self.dp_ids = deque(maxlen=500)  # (stream, id) dei QSO gia' presi: un rinvio non va in coda due volte
         self.wake = threading.Event()
 
     # --- stato leggibile
@@ -349,6 +449,11 @@ class Core:
             lines.append(self.port_error)
         else:
             lines.append(f'In ascolto su 127.0.0.1:{self.bound_port or c["port"]}')
+        if (c.get('decoport') or '').strip():
+            if self.dp_state == 'linked':
+                lines.append('DecoDXLog collegato via DecoPort' + (f' ({self.dp_peer})' if self.dp_peer else ''))
+            else:
+                lines.append(f'DecoPort: in attesa di DecoDXLog (porta {c.get("decoport_port") or DEFAULT_DP_PORT}): controlla che la password sia la stessa')
         if self.net == 'no_key':
             lines.append('Manca la chiave di invio: apri Configura')
         elif self.net == 'key_invalid':
@@ -449,6 +554,93 @@ class Core:
         log(f'QSO ricevuti da {addr[0]}:{addr[1]} ({n} record): {self.last_qso}')
         self.wake.set()
 
+    # --- DecoPort: DecoDXLog, in modo nativo
+    def decoport_loop(self):
+        sock, key, keyed_for, last_send, seq = None, b'', None, 0.0, 0
+        stream_id = struct.unpack('>I', os.urandom(4))[0]
+        while not self.stop.is_set():
+            pw = (self.cfg.get('decoport') or '').strip()
+            if not pw:
+                if sock:
+                    sock.close()
+                    sock = None
+                self.dp_state = 'off'
+                self.stop.wait(2)
+                continue
+            if pw != keyed_for:
+                key, keyed_for = dp_key(pw), pw
+                self.dp_state = 'searching'
+            try:
+                port = int(self.cfg.get('decoport_port') or DEFAULT_DP_PORT)
+            except ValueError:
+                port = DEFAULT_DP_PORT
+            if sock is None:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.bind(('127.0.0.1', 0))
+                    sock.settimeout(0.5)
+                    no_connreset(sock)
+                except OSError:
+                    if sock:
+                        sock.close()
+                    sock = None
+                    self.stop.wait(10)
+                    continue
+            now = time.time()
+            if now - last_send >= 4:  # HELLO finche' non risponde, poi KEEPALIVE: DecoDXLog lascia chi tace da 12 secondi
+                last_send, seq = now, seq + 1
+                try:
+                    sock.sendto(dp_build(DP_KEEPALIVE if self.dp_state == 'linked' else DP_HELLO, stream_id, seq, b'', key), ('127.0.0.1', port))
+                except OSError:
+                    pass
+            if self.dp_state == 'linked' and now - self.dp_seen > 12:
+                self.dp_state = 'searching'
+                log('DecoDXLog non risponde piu su DecoPort')
+            try:
+                data, addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except ConnectionResetError:
+                continue
+            except OSError:
+                sock.close()
+                sock = None
+                continue
+            if addr != ('127.0.0.1', port):
+                continue
+            verdict, pkt = dp_parse(data, key)
+            if verdict != 'ok':
+                continue  # silenzio, come DecoPort: niente risposte a chi non ha la chiave giusta
+            ptype, sid, _seq, payload = pkt
+            self.dp_seen = self.last_packet = time.time()
+            self.last_client = 'DecoDXLog'
+            if ptype == DP_LOG_ANNOUNCE:
+                info = dp_announce(payload)
+                if info:
+                    self.dp_peer = ' · '.join(x for x in (f'{info["program"]} {info["version"]}'.strip(), info['station']) if x)
+            if self.dp_state != 'linked':
+                self.dp_state = 'linked'
+                log(f'DecoDXLog collegato via DecoPort ({self.dp_peer or "127.0.0.1:" + str(port)})')
+            if ptype == DP_LOG_QSO:
+                q = dp_qso(payload)
+                if q:
+                    qid, _resent, text = q
+                    seq += 1
+                    try:
+                        sock.sendto(dp_build(DP_LOG_ACK, stream_id, seq, struct.pack('>q', qid), key), addr)
+                    except OSError:
+                        pass
+                    if (sid, qid) not in self.dp_ids:
+                        self.dp_ids.append((sid, qid))
+                        if text.strip():
+                            self.on_adif('decoport', text, addr)
+        if sock:
+            try:
+                sock.sendto(dp_build(DP_BYE, stream_id, seq + 1, b'', key), ('127.0.0.1', port))
+            except (OSError, UnboundLocalError):
+                pass
+            sock.close()
+
     # --- invio
     def sender_loop(self):
         while not self.stop.is_set():
@@ -489,7 +681,7 @@ class Core:
                 self.wake.wait(30)
 
     def start(self):
-        for fn in (self.listen_loop, self.sender_loop):
+        for fn in (self.listen_loop, self.sender_loop, self.decoport_loop):
             threading.Thread(target=fn, daemon=True).start()
         if queue_len():
             self.wake.set()
@@ -590,6 +782,7 @@ HELP_DECODIUM = ('HH riceve i QSO in UDP da qualunque programma di log, all\'ind
                  '  • QARTest, N1MM+, DXLog, Log4OM: nelle impostazioni di rete/«Broadcast» abilita l\'invio\n'
                  '    dei contatti (Contacts / ContactInfo) verso 127.0.0.1, porta {port}\n'
                  '  • Programmi che inviano ADIF in UDP: stessa destinazione, un record per pacchetto\n'
+                 '  • DecoDXLog: nessuna porta UDP da impostare, basta la stessa password DecoPort nei due programmi\n'
                  'HH capisce da solo il formato (WSJT-X, XML N1MM/QARTest, ADIF).')
 
 
@@ -619,6 +812,12 @@ def setup_window():
     ttk.Label(frm, text='Porta UDP di ascolto').grid(sticky='w', **pad)
     port = tk.StringVar(value=cfg['port'])
     ttk.Entry(frm, textvariable=port, width=10).grid(sticky='w', **pad)
+    ttk.Label(frm, text='Password DecoPort, per DecoDXLog (la stessa di DecoDXLog → Account → HamHub HH)').grid(sticky='w', **pad)
+    dp_pw = tk.StringVar(value=cfg.get('decoport', ''))
+    ttk.Entry(frm, textvariable=dp_pw, width=40).grid(sticky='w', **pad)
+    ttk.Label(frm, text='Porta DecoPort di DecoDXLog').grid(sticky='w', **pad)
+    dp_port = tk.StringVar(value=cfg.get('decoport_port', str(DEFAULT_DP_PORT)))
+    ttk.Entry(frm, textvariable=dp_port, width=10).grid(sticky='w', **pad)
     notify = tk.BooleanVar(value=cfg.get('notify', '1') != '0')
     ttk.Checkbutton(frm, text='Mostra una notifica quando un QSO viene inviato', variable=notify).grid(sticky='w', **pad)
     help_lbl = ttk.Label(frm, text=HELP_DECODIUM.format(port=cfg['port']), justify='left', foreground='#444')
@@ -628,12 +827,13 @@ def setup_window():
     msg.grid(sticky='w', **pad)
 
     def current():
-        return dict(cfg, token=token.get().strip(), port=port.get().strip(), notify='1' if notify.get() else '0')
+        return dict(cfg, token=token.get().strip(), port=port.get().strip(), notify='1' if notify.get() else '0',
+                    decoport=dp_pw.get().strip(), decoport_port=dp_port.get().strip())
 
     def check():
         c = current()
-        if not valid_port(c['port']):
-            msg.config(text='La porta deve essere un numero tra 1024 e 65535.', foreground='#b00020')
+        if not valid_port(c['port']) or not valid_port(c['decoport_port']):
+            msg.config(text='Le porte devono essere numeri tra 1024 e 65535.', foreground='#b00020')
             return False
         ok, text = test_key(c)
         msg.config(text=text, foreground='#0a7d33' if ok else '#b00020')
@@ -641,8 +841,8 @@ def setup_window():
 
     def save():
         c = current()
-        if not valid_port(c['port']):
-            msg.config(text='La porta deve essere un numero tra 1024 e 65535.', foreground='#b00020')
+        if not valid_port(c['port']) or not valid_port(c['decoport_port']):
+            msg.config(text='Le porte devono essere numeri tra 1024 e 65535.', foreground='#b00020')
             return
         write_cfg(c)
         root.destroy()
@@ -960,6 +1160,19 @@ def main():
             cfg['port'] = args[1]
         write_cfg(cfg)
         print(f'configurazione salvata in {CFG}')
+        return 0
+    if '--decoport' in sys.argv:
+        args = sys.argv[sys.argv.index('--decoport') + 1:]
+        if not args or args[0].startswith('--'):
+            sys.exit('uso: HH --decoport PASSWORD [PORTA]')
+        cfg = read_cfg()
+        cfg['decoport'] = args[0].strip()
+        if len(args) > 1 and not args[1].startswith('--'):
+            if not valid_port(args[1]):
+                sys.exit('la porta deve essere un numero tra 1024 e 65535')
+            cfg['decoport_port'] = args[1]
+        write_cfg(cfg)
+        print(f'password DecoPort salvata in {CFG}')
         return 0
     if IS_WIN and '--console' not in sys.argv:
         ctypes.windll.kernel32.FreeConsole()  # se lanciato da python.exe o da un terminale, nessuna finestra di testo resta aperta

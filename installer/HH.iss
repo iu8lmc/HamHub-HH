@@ -1,7 +1,7 @@
 ; Installer di HH - client HamHub Log per Decodium / DecoDXLog
 
 #define MyAppName "HH - HamHub Log"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppExe "HH.exe"
 
 [Setup]

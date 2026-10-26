@@ -12,8 +12,19 @@ Se la rete manca i QSO restano in coda e vengono rispediti. Funziona su **Window
 | Decodium, WSJT-X (protocollo WSJT-X: «QSO Logged» e «Logged ADIF») | Impostazioni → UDP Server: `127.0.0.1`, porta `12060` |
 | QARTest, N1MM+, DXLog, Log4OM (XML `contactinfo`/`contactreplace`) | Rete/Broadcast: invio contatti verso `127.0.0.1`, porta `12060` |
 | Qualunque programma che invia un record ADIF per pacchetto UDP | stessa destinazione |
+| **DecoDXLog** (DecoPort, in modo nativo) | Nessuna porta UDP: la stessa **password DecoPort** in DecoDXLog e in HH |
 
 HH riconosce da solo il formato. Gli altri pacchetti (heartbeat, status, cancellazioni) vengono ignorati.
+
+### DecoDXLog con DecoPort
+
+DecoDXLog parla con HH in modo nativo, con il protocollo **DecoPort** (quello con cui Decodium 4 mette in rete la radio): HH si registra da solo sulla porta `5561` di `127.0.0.1`, riceve ogni QSO appena scritto **firmato** (HMAC-SHA256 con la chiave di una password condivisa) e lo **conferma**; senza conferma DecoDXLog lo rimanda fino a tre volte. Non c'è nessun indirizzo né porta UDP da scrivere.
+
+1. In DecoDXLog: Impostazioni → *Collegamento a Decodium* → **HamHub · QSO verso HH**: scrivi una password (sta nel portachiavi del sistema).
+2. In HH: *Configura* → **Password DecoPort**, la stessa; oppure `HH --decoport PASSWORD [PORTA]`.
+3. Il tooltip dell'icona dice «DecoDXLog collegato via DecoPort».
+
+Senza password HH non apre la sessione: DecoPort non ha una modalità in chiaro. Un pacchetto con la firma sbagliata non riceve risposta. Il protocollo è descritto in `docs/DECOPORT-LOG.md` di DecoDXLog.
 
 ## Uso
 
@@ -25,6 +36,7 @@ HH riconosce da solo il formato. Gli altri pacchetti (heartbeat, status, cancell
 HH              avvia HH (icona nell'area di notifica, una sola istanza)
 HH --setup      finestra di configurazione (chiave di invio, porta)
 HH --configure CHIAVE [PORTA]   salva la configurazione senza finestre (server, SSH, schermi assenti)
+HH --decoport PASSWORD [PORTA]  salva la password DecoPort (e la porta, predefinita 5561) per ricevere i QSO da DecoDXLog
 HH --console    solo ricevitore in un terminale, per le prove
 HH --version
 ```
@@ -37,7 +49,7 @@ Configurazione, coda (`HH_queue.adi`) e registro (`HH.log`) stanno in:
 | macOS | `~/Library/Application Support/HamHub/HH` |
 | Linux | `~/.config/HamHub/HH` (o `$XDG_CONFIG_HOME`) |
 
-Il file `HH.ini` contiene la chiave di invio: su Linux e macOS è leggibile solo dall'utente (`0600`). **Non va condiviso né committato.**
+Il file `HH.ini` contiene la chiave di invio e la password DecoPort: su Linux e macOS è leggibile solo dall'utente (`0600`). **Non va condiviso né committato.**
 
 ## Windows
 
@@ -85,11 +97,11 @@ python build.py      # -> dist/HH.exe (Windows), dist/HH (Linux), dist/HH.app (m
 python tests/test_hh.py
 ```
 
-Prova il protocollo (Decodium/WSJT-X, XML N1MM/QARTest, ADIF), la coda e i ritentativi contro un server finto, le cartelle, l'avvio automatico e l'istanza unica. Su Windows prova anche l'icona nell'area di notifica.
+Prova il protocollo (Decodium/WSJT-X, XML N1MM/QARTest, ADIF, DecoPort con un DecoDXLog finto), la coda e i ritentativi contro un server finto, le cartelle, l'avvio automatico e l'istanza unica. Su Windows prova anche l'icona nell'area di notifica.
 
 ## Sicurezza e privacy
 
-HH ascolta solo su `127.0.0.1` (non è raggiungibile dalla rete) e invia i QSO a `https://hamhub.cloud/log-api/adif` con la tua chiave di invio, che puoi revocare in ogni momento dalla pagina *Chiave*. [Informativa privacy](https://hamhub.cloud/privacy/).
+HH ascolta solo su `127.0.0.1` (non è raggiungibile dalla rete; con DecoPort scambia pacchetti firmati solo con DecoDXLog sulla stessa macchina) e invia i QSO a `https://hamhub.cloud/log-api/adif` con la tua chiave di invio, che puoi revocare in ogni momento dalla pagina *Chiave*. [Informativa privacy](https://hamhub.cloud/privacy/).
 
 ## Licenza
 

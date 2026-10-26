@@ -20,6 +20,13 @@ Prima configurazione
      l'invio dei contatti (Contacts / ContactInfo) all'indirizzo 127.0.0.1, porta 12060.
      HH riconosce da solo il formato: WSJT-X (Decodium), XML N1MM/QARTest, ADIF in UDP.
      (DecoDXLog continua a ricevere i QSO dalla destinazione primaria, porta 2237.)
+  3c. DECODXLOG, in modo nativo con DecoPort (nessuna porta UDP da scrivere):
+       - in DecoDXLog: Impostazioni, "Collegamento a Decodium", sezione "HamHub - QSO verso HH":
+         scrivi una password (resta nel portachiavi del sistema)
+       - in HH: Configura, "Password DecoPort": la stessa password
+         (oppure da riga di comando:  HH --decoport PASSWORD)
+       Il tooltip dell'icona dice "DecoDXLog collegato via DecoPort". I QSO arrivano firmati e
+       confermati. Senza password non si apre niente.
   4. Fai un QSO di prova: l'icona mostra "Ultimo QSO: ..." e compare una notifica
      "QSO inviato al tuo log". I QSO si vedono su https://hamhub.cloud/log/#qso
 
@@ -32,7 +39,7 @@ Uso quotidiano
   Configura e partono subito.
 
 File di HH (in %APPDATA%\HamHub\HH):
-  HH.ini        configurazione (chiave di invio, porta, indirizzo)
+  HH.ini        configurazione (chiave di invio, porta, indirizzo, password DecoPort)
   HH_queue.adi  QSO in attesa di invio
   HH.log        registro delle operazioni (utile se i QSO non arrivano:
                 indica quali pacchetti arrivano da Decodium)
@@ -43,4 +50,4 @@ Se i QSO non compaiono
     Controlla la porta nelle impostazioni di Decodium.
   - Se la porta risulta occupata, cambia porta in Configura e in Decodium.
 
-Versione 1.2.0
+Versione 1.3.0

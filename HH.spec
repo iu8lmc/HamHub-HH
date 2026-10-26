@@ -12,14 +12,16 @@ elif IS_MAC:
 else:
     hidden += ['pystray._xorg', 'pystray._appindicator', 'pystray._gtk', 'pystray._util.gtk', 'pystray._util.notify_dbus']
 
-a = Analysis(['HH.py'], pathex=[], binaries=[], datas=[('hh.ico', '.')], hiddenimports=hidden, hookspath=[], runtime_hooks=[], excludes=[])
+# su Windows l'icona e' nativa: pystray e Pillow non servono e farebbero crescere l'eseguibile
+excl = ['pystray', 'PIL'] if IS_WIN else []
+a = Analysis(['HH.py'], pathex=[], binaries=[], datas=[('hh.ico', '.')], hiddenimports=hidden, hookspath=[], runtime_hooks=[], excludes=excl)
 pyz = PYZ(a.pure)
 
 if IS_MAC:
     exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='HH', console=False, icon='hh.icns')
     coll = COLLECT(exe, a.binaries, a.datas, name='HH')
     app = BUNDLE(coll, name='HH.app', icon='hh.icns', bundle_identifier='cloud.hamhub.hh',
-                 info_plist={'CFBundleName': 'HH', 'CFBundleDisplayName': 'HH - HamHub Log', 'CFBundleShortVersionString': '1.2.0',
+                 info_plist={'CFBundleName': 'HH', 'CFBundleDisplayName': 'HH - HamHub Log', 'CFBundleShortVersionString': '1.3.0',
                              'LSUIElement': True,  # niente icona nel Dock: HH vive nella barra dei menu
                              'NSHighResolutionCapable': True})
 else:

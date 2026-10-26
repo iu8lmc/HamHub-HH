@@ -339,4 +339,139 @@ check('--configure: chiave e porta salvate', (cfg['token'], cfg['port']), ('chia
 sys.argv = old_argv
 check('porta non valida in --configure: uscita con errore', subprocess.run([sys.executable, os.path.join(HERE, '..', 'HH.py'), '--configure', 'x', '80'], capture_output=True, env=dict(os.environ, HH_DATA_DIR=DATA)).returncode != 0, True)
 check('--version', subprocess.run([sys.executable, os.path.join(HERE, '..', 'HH.py'), '--version'], capture_output=True, env=dict(os.environ, HH_DATA_DIR=DATA)).stdout.decode().strip(), f'HH {HH.VERSION}')
+# ================= DecoPort: i QSO di DecoDXLog, firmati e confermati
+DP_PASSWORD = 'segreto-prova'
+DP_KEY = HH.dp_key(DP_PASSWORD)
+# Gli stessi vettori della prova in C++ (tests/tst_decoportlog.cpp di DecoDXLog): calcolati a parte, i due programmi concordano.
+check('DecoPort: chiave dalla password', DP_KEY.hex(), 'f5f04a69c65369dc9cbad0133e2d03bb017ceb738e37b7e5e4a4f1705d24e419')
+check('DecoPort: gli spazi ai bordi non contano, password vuota = nessuna chiave', (HH.dp_key('  segreto-prova \n'), HH.dp_key('  ')), (DP_KEY, b''))
+VEC_PAYLOAD = bytes.fromhex('000000000000002a00') + b'<CALL:5>IU8LM<EOR>'
+VEC_PACKET = HH.dp_build(HH.DP_LOG_QSO, 0x0A0B0C0D, 7, VEC_PAYLOAD, DP_KEY, now=1790000000.123)
+check('DecoPort: pacchetto firmato identico a quello di DecoDXLog', VEC_PACKET.hex(),
+      '44505254011100030a0b0c0d000000076ab13b800754d4c0001b0000000000000000002a003c43414c4c3a353e4955384c4d3c454f523eeebb612f25a3ece969522e348ba25446')
+check('DecoPort: lettura del pacchetto', HH.dp_parse(VEC_PACKET, DP_KEY, now=1790000000.5), ('ok', (HH.DP_LOG_QSO, 0x0A0B0C0D, 7, VEC_PAYLOAD)))
+check('DecoPort: altra password = firma sbagliata', HH.dp_parse(VEC_PACKET, HH.dp_key('un altra'), now=1790000000)[0], 'bad')
+tampered = bytearray(VEC_PACKET)
+tampered[HH.DP_HEADER] ^= 1
+check('DecoPort: un byte cambiato = firma sbagliata', HH.dp_parse(bytes(tampered), DP_KEY, now=1790000000)[0], 'bad')
+check('DecoPort: senza firma', HH.dp_parse(HH.dp_build(HH.DP_HELLO, 1, 1, b'', b''), DP_KEY)[0], 'unsigned')
+check('DecoPort: registrato e rimandato dopo 31 secondi = scaduto', (HH.dp_parse(VEC_PACKET, DP_KEY, now=1790000031.2)[0], HH.dp_parse(VEC_PACKET, DP_KEY, now=1790000030)[0]), ('stale', 'ok'))
+check('DecoPort: troncato o non DecoPort', (HH.dp_parse(VEC_PACKET[:20], DP_KEY)[0], HH.dp_parse(b'hello', DP_KEY)[0]), ('malformed', 'malformed'))
+lying = bytearray(VEC_PACKET)
+lying[24] = 0x7F
+check('DecoPort: lunghezza dichiarata oltre il datagramma', HH.dp_parse(bytes(lying), DP_KEY, now=1790000000)[0], 'malformed')
+ann = struct.pack('>I', 0b1111) + b'\x09DecoDXLog' + b'\x051.2.3' + b'\x06IU8LMC' + struct.pack('>H', 5561)
+check('DecoPort: annuncio del log', HH.dp_announce(ann), {'program': 'DecoDXLog', 'version': '1.2.3', 'station': 'IU8LMC', 'port': 5561})
+check('DecoPort: annuncio illeggibile', HH.dp_announce(b'\x00\x00'), None)
+check('DecoPort: QSO del log', HH.dp_qso(VEC_PAYLOAD), (42, False, '<CALL:5>IU8LM<EOR>'))
+check('DecoPort: QSO troppo corto', HH.dp_qso(b'12345'), None)
+
+# Un DecoDXLog finto sulla sua porta: HH si registra, riceve il QSO, lo conferma, e non lo mette in coda due volte.
+logger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+logger.bind(('127.0.0.1', 0))
+logger.settimeout(6)
+dp_port = logger.getsockname()[1]
+check('DecoPort: la porta predefinita', HH.read_cfg()['decoport_port'], '5561')
+free2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+free2.bind(('127.0.0.1', 0))
+uport2 = free2.getsockname()[1]
+free2.close()
+Stub.down = False
+Stub.got.clear()
+srv2 = ThreadingHTTPServer(('127.0.0.1', 0), Stub)  # il primo e' stato chiuso con la prova dell'invio
+threading.Thread(target=srv2.serve_forever, daemon=True).start()
+url2 = f'http://127.0.0.1:{srv2.server_address[1]}/adif'
+HH.write_cfg({'token': 'good', 'port': str(uport2), 'url': url2, 'notify': '0', 'decoport': DP_PASSWORD, 'decoport_port': str(dp_port)})
+dcore = HH.Core()
+dcore.start()
+
+
+def logger_recv():
+    """Il prossimo pacchetto firmato da HH (verso il logger) e da dove viene."""
+    data, addr = logger.recvfrom(65535)
+    return HH.dp_parse(data, DP_KEY), addr
+
+
+(verdict, pkt), hh_addr = logger_recv()
+check('DecoPort: HH si registra con un HELLO firmato', (verdict, pkt[0]), ('ok', HH.DP_HELLO))
+logger.sendto(HH.dp_build(HH.DP_LOG_ANNOUNCE, 77, 1, ann, DP_KEY), hh_addr)
+for _ in range(50):
+    if dcore.dp_state == 'linked':
+        break
+    time.sleep(0.1)
+check('DecoPort: HH sa di essere collegato', (dcore.dp_state, dcore.dp_peer), ('linked', 'DecoDXLog 1.2.3 · IU8LMC'))
+check('DecoPort: lo stato racconta il collegamento', any('DecoDXLog collegato via DecoPort' in x for x in dcore.status_lines()), True)
+
+adif = '<CALL:6>DP1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20261025<TIME_ON:6>101500<EOR>'
+qso = struct.pack('>qB', 9001, 0) + adif.encode()
+logger.sendto(HH.dp_build(HH.DP_LOG_QSO, 77, 2, qso, DP_KEY), hh_addr)
+while True:
+    (verdict, pkt), _ = logger_recv()
+    if pkt and pkt[0] == HH.DP_LOG_ACK:
+        break
+check('DecoPort: HH conferma il QSO con il suo id', (verdict, struct.unpack('>q', pkt[3])[0]), ('ok', 9001))
+for _ in range(80):
+    if any('DP1ABC' in g for g in Stub.got):
+        break
+    time.sleep(0.1)
+check('DecoPort: il QSO arriva al cloud', sum('DP1ABC' in g for g in Stub.got), 1)
+check('DecoPort: ultimo QSO', dcore.last_qso, 'DP1ABC')
+
+# Lo stesso QSO rimandato (l'ACK si era perso): confermato di nuovo, ma in coda una volta sola.
+logger.sendto(HH.dp_build(HH.DP_LOG_QSO, 77, 3, struct.pack('>qB', 9001, 1) + adif.encode(), DP_KEY), hh_addr)
+while True:
+    (verdict, pkt), _ = logger_recv()
+    if pkt and pkt[0] == HH.DP_LOG_ACK:
+        break
+time.sleep(1)
+check('DecoPort: un rinvio non duplica il QSO', sum('DP1ABC' in g for g in Stub.got), 1)
+
+# Chi non ha la chiave giusta non si fa sentire, e non fa nulla.
+bad_key = HH.dp_key('un altra')
+logger.sendto(HH.dp_build(HH.DP_LOG_QSO, 77, 4, struct.pack('>qB', 9002, 0) + b'<CALL:6>BAD1XX<EOR>', bad_key), hh_addr)
+logger.sendto(HH.dp_build(HH.DP_LOG_QSO, 77, 5, struct.pack('>qB', 9003, 0) + b'<CALL:6>BAD2XX<EOR>', b''), hh_addr)
+logger.settimeout(1.5)
+silent = False
+try:
+    while True:
+        (verdict, pkt), _ = logger_recv()
+        if pkt and pkt[0] == HH.DP_LOG_ACK:
+            break
+except socket.timeout:
+    silent = True
+time.sleep(0.5)
+check('DecoPort: firma sbagliata o assente = silenzio, nessun QSO', (silent, any('BAD' in g for g in Stub.got)), (True, False))
+
+# Un altro mittente (altra porta) non e' DecoDXLog.
+other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+other.bind(('127.0.0.1', 0))
+other.sendto(HH.dp_build(HH.DP_LOG_QSO, 88, 1, struct.pack('>qB', 9004, 0) + b'<CALL:6>BAD3XX<EOR>', DP_KEY), hh_addr)
+time.sleep(0.7)
+check('DecoPort: solo la porta di DecoDXLog e\' creduta', any('BAD3XX' in g for g in Stub.got), False)
+other.close()
+
+dcore.shutdown()
+logger.settimeout(3)
+got_bye = False
+try:
+    while True:
+        (verdict, pkt), _ = logger_recv()
+        if pkt and pkt[0] == HH.DP_BYE:
+            got_bye = True
+            break
+except socket.timeout:
+    pass
+check('DecoPort: alla chiusura HH saluta con un BYE', got_bye, True)
+srv2.shutdown()
+logger.close()
+
+# --decoport PASSWORD [PORTA]
+old_argv = sys.argv
+sys.argv = ['HH.py', '--decoport', 'nuova password', '5599']
+HH.main()
+cfg = HH.read_cfg()
+check('--decoport: password e porta salvate', (cfg['decoport'], cfg['decoport_port']), ('nuova password', '5599'))
+sys.argv = old_argv
+check('porta non valida in --decoport: uscita con errore', subprocess.run([sys.executable, os.path.join(HERE, '..', 'HH.py'), '--decoport', 'x', '80'], capture_output=True, env=dict(os.environ, HH_DATA_DIR=DATA)).returncode != 0, True)
+
 print('TUTTI I TEST HH OK')
